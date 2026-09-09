@@ -44,6 +44,11 @@ candidate window. It does not require a fixed 1000-pixel window height, so a
 is supported. Mixed-resolution monitors are handled independently, and no
 resolution or scaling value needs to be entered manually.
 
+
+The saved anchor is selected from display-specific entries in Codex state when available (`byResolution` or `byDisplayId`).
+The script maps that anchor into the coordinate space of the monitor that contains the live overlay.
+The repair region is centered on the mascot's standard 112x121 box with monitor-relative padding.
+This matters because Windows `SetWindowRgn` limits both mouse input and drawing; the region must cover the whole mascot to avoid clipping the image.
 If Codex is closed, the script simply reports that the overlay was not found;
 it does not launch or modify Codex.
 
