@@ -153,7 +153,6 @@ public static class CodexPetOverlayShim
     private const int SM_CXVIRTUALSCREEN = 78;
     private const int SM_CYVIRTUALSCREEN = 79;
     private const uint MONITOR_DEFAULTTONEAREST = 2;
-    private const int DEFAULT_MASCOT_WIDTH = 112;
     private const int DEFAULT_MASCOT_HEIGHT = 121;
     private const long WS_EX_TOOLWINDOW = 0x80L;
     private const long WS_EX_TRANSPARENT = 0x20L;
@@ -238,17 +237,6 @@ public static class CodexPetOverlayShim
         return value;
     }
 
-    private static int MapCoordinate(int value, int sourceOrigin, int sourceLength, int targetOrigin, int targetLength)
-    {
-        if (sourceLength <= 0 || targetLength <= 0)
-        {
-            return value;
-        }
-
-        double normalized = (double)(value - sourceOrigin) / sourceLength;
-        return targetOrigin + (int)Math.Round(normalized * targetLength);
-    }
-
     private static bool IsUsableAnchor(int localX, int localY, int width, int height, int margin)
     {
         return localX > -margin
@@ -281,88 +269,51 @@ public static class CodexPetOverlayShim
         int width = window.Right - window.Left;
         int height = window.Bottom - window.Top;
 
-        // The saved x/y values are the top-left of the mascot bounds.  Map
-        // them through the monitor that owns the live overlay first: Electron
-        // and a DPI-virtualized PowerShell host can report the same monitor in
-        // different coordinate spaces.  Fall back to the direct value only
-        // when the monitor/display metadata is unavailable or implausible.
-        RECT monitorBounds;
-        bool haveMonitorBounds = TryGetMonitorBounds(overlay, out monitorBounds);
-        int monitorWidth = haveMonitorBounds
-            ? Math.Abs(monitorBounds.Right - monitorBounds.Left)
-            : 0;
-        int monitorHeight = haveMonitorBounds
-            ? Math.Abs(monitorBounds.Bottom - monitorBounds.Top)
-            : 0;
-        int directLocalX = anchorX - window.Left;
+        // Keep the geometry in the live overlay's own coordinate space.
+        // Monitor resolution and DPI are not configuration inputs here:
+        // display metadata is used only to normalize the saved screen anchor
+        // into the current window, while the live HWND supplies the bounds.
+        // Keep both interpretations when a DPI-virtualized host makes them
+        // disagree; the union prevents a wrong conversion from clipping the
+        // mascot or its balloon.
         int directLocalY = anchorY - window.Top;
-        int anchorLocalX = directLocalX;
-        int anchorLocalY = directLocalY;
-        string mode = "direct";
-        int candidateMargin = Math.Max(
-            DEFAULT_MASCOT_WIDTH,
-            Math.Min(256, Math.Min(width, height) / 4));
-
-        if (haveMonitorBounds && displayWidth > 0 && displayHeight > 0)
+        var candidateAnchorYs = new List<int>();
+        candidateAnchorYs.Add(directLocalY);
+        if (displayHeight > 0)
         {
-            int mappedAnchorX = MapCoordinate(
-                anchorX,
-                displayX,
-                displayWidth,
-                monitorBounds.Left,
-                monitorWidth);
-            int mappedAnchorY = MapCoordinate(
-                anchorY,
-                displayY,
-                displayHeight,
-                monitorBounds.Top,
-                monitorHeight);
-            int mappedLocalX = mappedAnchorX - window.Left;
-            int mappedLocalY = mappedAnchorY - window.Top;
-            if (IsUsableAnchor(mappedLocalX, mappedLocalY, width, height, candidateMargin))
+            int normalizedLocalY = (int)Math.Round(
+                (double)(anchorY - displayY) * height / displayHeight);
+            candidateAnchorYs.Add(normalizedLocalY);
+        }
+
+        int candidateMargin = Math.Max(DEFAULT_MASCOT_HEIGHT, height / 4);
+        int minAnchorY = int.MaxValue;
+        int maxAnchorY = int.MinValue;
+        foreach (int candidateY in candidateAnchorYs)
+        {
+            if (!IsUsableAnchor(0, candidateY, 1, height, candidateMargin))
             {
-                anchorLocalX = mappedLocalX;
-                anchorLocalY = mappedLocalY;
-                mode = "display-mapped";
+                continue;
             }
+            minAnchorY = Math.Min(minAnchorY, candidateY);
+            maxAnchorY = Math.Max(maxAnchorY, candidateY);
         }
-
-        // Keep a compatibility fallback for older state files without usable
-        // display metadata.  This path assumes the overlay window follows the
-        // saved display as a normalized viewport.
-        if (!IsUsableAnchor(anchorLocalX, anchorLocalY, width, height, candidateMargin)
-            && displayWidth > 0
-            && displayHeight > 0)
+        if (minAnchorY == int.MaxValue)
         {
-            anchorLocalX = (int)Math.Round((double)(anchorX - displayX) * width / displayWidth);
-            anchorLocalY = (int)Math.Round((double)(anchorY - displayY) * height / displayHeight);
-            mode = "window-normalized";
+            minAnchorY = Math.Max(0, height / 2 - DEFAULT_MASCOT_HEIGHT / 2);
+            maxAnchorY = minAnchorY;
         }
 
-        // SetWindowRgn clips painting as well as mouse input.  Size the region
-        // from the app's standard 112x121 mascot box plus monitor-relative
-        // padding instead of a fixed 300x300 box and fixed offsets.  The
-        // generous margin absorbs small renderer/DPI rounding differences.
-        int horizontalPadding = monitorWidth > 0
-            ? Math.Max(96, Math.Min(192, monitorWidth / 12))
-            : 128;
-        int verticalPadding = monitorHeight > 0
-            ? Math.Max(96, Math.Min(192, monitorHeight / 12))
-            : 128;
-        int requestedRegionWidth = Math.Max(
-            320,
-            DEFAULT_MASCOT_WIDTH + horizontalPadding * 2);
-        int requestedRegionHeight = Math.Max(
-            320,
-            DEFAULT_MASCOT_HEIGHT + verticalPadding * 2);
-        int regionWidth = Math.Min(width, requestedRegionWidth);
-        int regionHeight = Math.Min(height, requestedRegionHeight);
-        int mascotCenterX = anchorLocalX + DEFAULT_MASCOT_WIDTH / 2;
-        int mascotCenterY = anchorLocalY + DEFAULT_MASCOT_HEIGHT / 2;
-        int left = Clamp(mascotCenterX - regionWidth / 2, 0, Math.Max(0, width - regionWidth));
-        int top = Clamp(mascotCenterY - regionHeight / 2, 0, Math.Max(0, height - regionHeight));
-        int right = Math.Min(width, left + regionWidth);
-        int bottom = Math.Min(height, top + regionHeight);
+        // SetWindowRgn clips painting as well as mouse input.  Use the full
+        // live overlay width so a balloon can extend horizontally without
+        // being cut off.  The vertical padding is derived from the current
+        // window height and expands around every plausible anchor conversion.
+        // No 300x300 box or hand-tuned -128/-96 offsets remain.
+        int verticalPadding = Math.Max(DEFAULT_MASCOT_HEIGHT, height / 8);
+        int left = 0;
+        int top = Clamp(minAnchorY - verticalPadding, 0, height);
+        int right = width;
+        int bottom = Clamp(maxAnchorY + DEFAULT_MASCOT_HEIGHT + verticalPadding, 0, height);
         if (right <= left || bottom <= top)
         {
             return "invalid-target-region";
@@ -407,7 +358,7 @@ public static class CodexPetOverlayShim
         return string.Format(
             "applied hwnd=0x{0:X} mode={1} window={2},{3},{4}x{5} region={6},{7},{8}x{9}",
             overlay.ToInt64(),
-            mode,
+            "window-wide",
             window.Left,
             window.Top,
             width,
