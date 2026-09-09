@@ -41,6 +41,13 @@ The default mode reads the current anchor from:
 If Codex is closed, the script simply reports that the overlay was not found;
 it does not launch or modify Codex.
 
+If the pet is missing after a previous workaround attempt, restart Codex once
+before starting `-Watch`. The app must recreate a visible overlay window before
+the shim can repair its native hit region. If the one-shot command reports
+`overlay-not-found`, the shim has not changed anything; check that Codex is
+running in the same interactive Windows session and try again after toggling
+the pet off and on in Codex settings.
+
 ## Entering coordinates for another environment
 
 Normally leave out `-AnchorX` and `-AnchorY`. The script follows the current
@@ -115,8 +122,8 @@ returning to the unmodified application.
 
 ## Privacy and repository scope
 
-The repository intentionally contains only the PowerShell script and this
-README. The script does not contain a username, local absolute path, IP
+The repository intentionally contains only the PowerShell script, this README,
+and the ignore file. The script does not contain a username, local absolute path, IP
 address, token, screenshot, pet artwork, or Codex state snapshot. At runtime
 it resolves the current user's profile dynamically, reads the local overlay
 state, and writes `repair-codex-pet-overlay.log` only when an error occurs.
