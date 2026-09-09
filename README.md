@@ -46,9 +46,14 @@ resolution or scaling value needs to be entered manually.
 
 
 The saved anchor is selected from display-specific entries in Codex state when available (`byResolution` or `byDisplayId`).
-The script maps that anchor into the coordinate space of the monitor that contains the live overlay.
-The repair region is centered on the mascot's standard 112x121 box with monitor-relative padding.
-This matters because Windows `SetWindowRgn` limits both mouse input and drawing; the region must cover the whole mascot to avoid clipping the image.
+The script converts that anchor into the live overlay window's own coordinate space. Resolution,
+DPI percentage, and monitor dimensions are not user-supplied settings; the current HWND and the saved
+display metadata are inspected at runtime.
+
+The repair region spans the live overlay width, so a speech balloon can extend sideways without being
+clipped. Its vertical bounds are derived from the live window height and all plausible anchor conversions.
+This matters because Windows `SetWindowRgn` limits both mouse input and drawing; the region must cover
+the whole mascot and balloon to avoid clipping either one.
 If Codex is closed, the script simply reports that the overlay was not found;
 it does not launch or modify Codex.
 
