@@ -1,0 +1,16 @@
+# Runtime output
+*.log
+
+# Local diagnostics and screenshots
+screenshots/
+diagnostics/
+*.png
+*.jpg
+*.jpeg
+*.webp
+
+# Editor and OS noise
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
