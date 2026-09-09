@@ -80,6 +80,15 @@ public static class CodexPetOverlayShim
     public static extern bool IsWindowVisible(IntPtr hWnd);
 
     [DllImport("user32.dll")]
+    public static extern int GetSystemMetrics(int index);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr MonitorFromWindow(IntPtr hWnd, uint flags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern bool GetMonitorInfo(IntPtr monitor, ref MONITORINFO info);
+
+    [DllImport("user32.dll")]
     public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
@@ -109,7 +118,19 @@ public static class CodexPetOverlayShim
         public int Bottom;
     }
 
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct MONITORINFO
+    {
+        public int Size;
+        public RECT Monitor;
+        public RECT Work;
+        public uint Flags;
+    }
+
     private const int GWL_EXSTYLE = -20;
+    private const int SM_CXVIRTUALSCREEN = 78;
+    private const int SM_CYVIRTUALSCREEN = 79;
+    private const uint MONITOR_DEFAULTTONEAREST = 2;
     private const long WS_EX_TOOLWINDOW = 0x80L;
     private const long WS_EX_TRANSPARENT = 0x20L;
     private const long WS_EX_LAYERED = 0x80000L;
@@ -123,6 +144,22 @@ public static class CodexPetOverlayShim
 
         IntPtr result = IntPtr.Zero;
         int resultArea = 0;
+        int virtualWidth = Math.Abs(GetSystemMetrics(SM_CXVIRTUALSCREEN));
+        int virtualHeight = Math.Abs(GetSystemMetrics(SM_CYVIRTUALSCREEN));
+
+        // GetWindowRect can be DPI-virtualized for a PowerShell host.  The
+        // overlay is normally a tall tool window, but a fixed 1000px minimum
+        // rejects a 1536x960 logical desktop (for example, 1920x1200 at 125%
+        // scaling).  Derive a conservative lower bound from the monitor that
+        // owns each candidate instead of assuming one physical resolution or
+        // using the tallest monitor in a mixed-resolution desktop.
+        int fallbackMinimumWidth = virtualWidth > 0
+            ? Math.Max(160, Math.Min(300, virtualWidth / 8))
+            : 200;
+        int fallbackMinimumHeight = virtualHeight > 0
+            ? Math.Max(360, Math.Min(1000, virtualHeight / 2))
+            : 480;
+
         EnumWindows((hWnd, lParam) =>
         {
             uint processId;
@@ -139,7 +176,28 @@ public static class CodexPetOverlayShim
             int area = width * height;
             long style = GetWindowLongPtr(hWnd, GWL_EXSTYLE).ToInt64();
             bool isToolWindow = (style & WS_EX_TOOLWINDOW) != 0;
-            if (width >= 300 && height >= 1000 && isToolWindow && area > resultArea)
+
+            int monitorWidth = virtualWidth;
+            int monitorHeight = virtualHeight;
+            IntPtr monitor = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
+            if (monitor != IntPtr.Zero)
+            {
+                MONITORINFO info = new MONITORINFO();
+                info.Size = Marshal.SizeOf(typeof(MONITORINFO));
+                if (GetMonitorInfo(monitor, ref info))
+                {
+                    monitorWidth = Math.Abs(info.Monitor.Right - info.Monitor.Left);
+                    monitorHeight = Math.Abs(info.Monitor.Bottom - info.Monitor.Top);
+                }
+            }
+
+            int minimumWidth = monitorWidth > 0
+                ? Math.Max(160, Math.Min(300, monitorWidth / 8))
+                : fallbackMinimumWidth;
+            int minimumHeight = monitorHeight > 0
+                ? Math.Max(360, Math.Min(1000, monitorHeight / 2))
+                : fallbackMinimumHeight;
+            if (width >= minimumWidth && height >= minimumHeight && isToolWindow && area > resultArea)
             {
                 result = hWnd;
                 resultArea = area;
@@ -285,7 +343,13 @@ catch {
     throw
 }
 
-$profileRoot = [Environment]::GetFolderPath('UserProfile')
+$profileRoot = $env:USERPROFILE
+if ([string]::IsNullOrWhiteSpace($profileRoot)) {
+    $profileRoot = [Environment]::GetFolderPath('UserProfile')
+}
+if ([string]::IsNullOrWhiteSpace($profileRoot)) {
+    throw 'Could not determine the current user profile path.'
+}
 $statePath = Join-Path $profileRoot '.codex\.codex-global-state.json'
 
 function Get-PetAnchor {
