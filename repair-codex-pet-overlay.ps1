@@ -153,7 +153,6 @@ public static class CodexPetOverlayShim
     private const int SM_CXVIRTUALSCREEN = 78;
     private const int SM_CYVIRTUALSCREEN = 79;
     private const uint MONITOR_DEFAULTTONEAREST = 2;
-    private const int DEFAULT_MASCOT_WIDTH = 112;
     private const int DEFAULT_MASCOT_HEIGHT = 121;
     private const long WS_EX_TOOLWINDOW = 0x80L;
     private const long WS_EX_TRANSPARENT = 0x20L;
