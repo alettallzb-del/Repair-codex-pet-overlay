@@ -38,6 +38,12 @@ The default mode reads the current anchor from:
 %USERPROFILE%\.codex\.codex-global-state.json
 ```
 
+The window detector adapts its size thresholds to the monitor containing each
+candidate window. It does not require a fixed 1000-pixel window height, so a
+1920x1200 display reported as 1536x960 by a DPI-virtualized PowerShell process
+is supported. Mixed-resolution monitors are handled independently, and no
+resolution or scaling value needs to be entered manually.
+
 If Codex is closed, the script simply reports that the overlay was not found;
 it does not launch or modify Codex.
 
