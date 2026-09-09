@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
-    [switch]$Watch,
     [switch]$Restore,
+    [ValidateRange(1, 900)]
+    [int]$WaitForOverlaySeconds = 300,
     [ValidateRange(100, 5000)]
     [int]$IntervalMs = 500,
     [ValidateRange(-32768, 32767)]
@@ -592,27 +593,39 @@ if ($Restore) {
     exit 0
 }
 
+$deadline = [DateTime]::UtcNow.AddSeconds($WaitForOverlaySeconds)
+$lastResult = 'overlay-not-found'
 do {
     try {
         $anchor = Get-PetAnchor
         if ($null -ne $anchor) {
-            [CodexPetOverlayShim]::Apply(
+            $lastResult = [CodexPetOverlayShim]::Apply(
                 $anchor.X,
                 $anchor.Y,
                 $anchor.DisplayX,
                 $anchor.DisplayY,
                 $anchor.DisplayWidth,
                 $anchor.DisplayHeight)
+            if ($lastResult -like 'applied *') {
+                Write-Output $lastResult
+                exit 0
+            }
+        }
+        else {
+            $lastResult = 'anchor-not-found'
         }
     }
     catch {
+        $lastResult = "error: {0}" -f $_.Exception.Message
         Write-RepairLog ("repair iteration failed: {0}" -f $_.Exception.Message)
-        if (-not $Watch) {
-            throw
-        }
     }
-    if (-not $Watch) {
+    if ([DateTime]::UtcNow -ge $deadline) {
         break
     }
     Start-Sleep -Milliseconds $IntervalMs
 } while ($true)
+
+$timeoutMessage = "overlay repair timed out after {0} seconds; last result: {1}" -f $WaitForOverlaySeconds, $lastResult
+Write-RepairLog $timeoutMessage
+Write-Output $timeoutMessage
+exit 1

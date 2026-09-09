@@ -1,5 +1,7 @@
 # Repair-codex-pet-overlay
 
+[日本語版](README.ja.md)
+
 Windows PowerShell workaround for a Codex Desktop avatar/pet overlay whose
 visual position and native mouse-hit region become unsynchronized.
 
@@ -26,10 +28,12 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\repair-codex-pet-overlay.ps1
 ```
 
-For continuous repair while Codex is running:
+The script is manual and one-shot. It waits up to 300 seconds for the visible
+Codex pet overlay. You may start it before Codex; once the overlay appears, the
+script applies the repair once and exits. To change the startup wait window:
 
 ```powershell
-.\repair-codex-pet-overlay.ps1 -Watch -IntervalMs 500
+.\repair-codex-pet-overlay.ps1 -WaitForOverlaySeconds 120
 ```
 
 The default mode reads the current anchor from:
@@ -56,15 +60,17 @@ window height and all plausible anchor conversions. This matters because
 Windows `SetWindowRgn` limits both mouse input and drawing; the region must
 cover the whole mascot and balloon to avoid clipping either one.
 
-If Codex is closed, the script simply reports that the overlay was not found;
-it does not launch or modify Codex.
+The script does not launch or modify Codex. A successful repair prints an
+`applied ...` result and exits with status 0. If the overlay or its saved anchor
+does not become available within the wait window, it reports the last result,
+writes the diagnostic log, and exits with status 1. No background watcher is
+left running.
 
 If the pet is missing after a previous workaround attempt, restart Codex once
-before starting `-Watch`. The app must recreate a visible overlay window before
-the shim can repair its native hit region. If the one-shot command reports
-`overlay-not-found`, the shim has not changed anything; check that Codex is
-running in the same interactive Windows session and try again after toggling
-the pet off and on in Codex settings.
+before starting the manual repair. The app must recreate a visible overlay
+window before the shim can repair its native hit region. You can start the
+script before Codex and leave it waiting, or run it after toggling the pet off
+and on in Codex settings.
 
 ## Entering coordinates for another environment
 
@@ -74,7 +80,7 @@ pair:
 
 ```powershell
 .\repair-codex-pet-overlay.ps1 -AnchorX 2200 -AnchorY 1200
-.\repair-codex-pet-overlay.ps1 -Watch -AnchorX 2200 -AnchorY 1200
+.\repair-codex-pet-overlay.ps1 -WaitForOverlaySeconds 300 -AnchorX 2200 -AnchorY 1200
 ```
 
 These are absolute screen coordinates from Codex's saved display coordinate
@@ -95,36 +101,13 @@ The `x` and `y` fields are the values to enter. If the JSON is being rewritten
 while Codex is moving the pet, wait for the move to finish and run the command
 again.
 
-## Register at logon with Task Scheduler
+## Manual startup only
 
-Run the following from this repository directory. It registers a hidden task
-for the current interactive user and starts the watch loop at logon:
-
-```powershell
-$taskName = 'Codex Pet Overlay Input Repair'
-$scriptPath = Join-Path $PWD 'repair-codex-pet-overlay.ps1'
-$powershellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-$arguments = '-NoLogo -NoProfile -ExecutionPolicy Bypass -File "{0}" -Watch -IntervalMs 500' -f $scriptPath
-$action = New-ScheduledTaskAction -Execute $powershellPath -Argument $arguments
-$currentUser = "$env:USERDOMAIN\$env:USERNAME"
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
-$principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Limited
-$settings = New-ScheduledTaskSettingsSet -Hidden -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force
-Start-ScheduledTask -TaskName $taskName
-```
-
-Check or remove it with:
-
-```powershell
-Get-ScheduledTask -TaskName 'Codex Pet Overlay Input Repair' | Select-Object TaskName,State
-Stop-ScheduledTask -TaskName 'Codex Pet Overlay Input Repair'
-Unregister-ScheduledTask -TaskName 'Codex Pet Overlay Input Repair' -Confirm:$false
-```
-
-If Task Scheduler denies registration, run PowerShell as Administrator and
-repeat the registration block. The task still runs as the selected user, not
-as a system service.
+This revision intentionally does not run a continuous watcher and no longer
+accepts `-Watch`. Do not register it in Task Scheduler. Start it manually before
+or after launching Codex; it waits for the overlay for up to five minutes,
+repairs it once, and then terminates. If the app is restarted or recreates its
+overlay later, run the script again when needed.
 
 ## Restore
 
@@ -135,14 +118,14 @@ To remove the shim from the currently visible overlay:
 ```
 
 Restart Codex afterward so the application can restore its own layered-window
-and mouse-input policy. Removing the scheduled task is also recommended when
-returning to the unmodified application.
+and mouse-input policy. The repair process is already one-shot and exits after
+success or timeout.
 
 ## Privacy and repository scope
 
-The repository intentionally contains only the PowerShell script, this README,
-and the ignore file. The script does not contain a username, local absolute path, IP
-address, token, screenshot, pet artwork, or Codex state snapshot. At runtime
+The repository intentionally contains only the PowerShell script, the README
+files, and the ignore file. The script does not contain a username, local
+absolute path, IP address, token, screenshot, pet artwork, or Codex state snapshot. At runtime
 it resolves the current user's profile dynamically, reads the local overlay
 state, and writes `repair-codex-pet-overlay.log` only when an error occurs.
 
