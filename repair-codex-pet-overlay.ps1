@@ -29,6 +29,8 @@ if ($PSBoundParameters.ContainsKey('AnchorX') -or $PSBoundParameters.ContainsKey
     }
 }
 $script:lastKnownAnchor = $script:anchorOverride
+$script:cachedGlobalState = $null
+$script:cachedStateWriteTimeUtc = $null
 
 function Write-RepairLog {
     param([string]$Message)
@@ -88,6 +90,26 @@ public static class CodexPetOverlayShim
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern bool GetMonitorInfo(IntPtr monitor, ref MONITORINFO info);
 
+    public static bool TryGetMonitorBounds(IntPtr hWnd, out RECT bounds)
+    {
+        bounds = new RECT();
+        IntPtr monitor = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
+        if (monitor == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        MONITORINFO info = new MONITORINFO();
+        info.Size = Marshal.SizeOf(typeof(MONITORINFO));
+        if (!GetMonitorInfo(monitor, ref info))
+        {
+            return false;
+        }
+
+        bounds = info.Monitor;
+        return true;
+    }
+
     [DllImport("user32.dll")]
     public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
 
@@ -131,6 +153,8 @@ public static class CodexPetOverlayShim
     private const int SM_CXVIRTUALSCREEN = 78;
     private const int SM_CYVIRTUALSCREEN = 79;
     private const uint MONITOR_DEFAULTTONEAREST = 2;
+    private const int DEFAULT_MASCOT_WIDTH = 112;
+    private const int DEFAULT_MASCOT_HEIGHT = 121;
     private const long WS_EX_TOOLWINDOW = 0x80L;
     private const long WS_EX_TRANSPARENT = 0x20L;
     private const long WS_EX_LAYERED = 0x80000L;
@@ -214,6 +238,25 @@ public static class CodexPetOverlayShim
         return value;
     }
 
+    private static int MapCoordinate(int value, int sourceOrigin, int sourceLength, int targetOrigin, int targetLength)
+    {
+        if (sourceLength <= 0 || targetLength <= 0)
+        {
+            return value;
+        }
+
+        double normalized = (double)(value - sourceOrigin) / sourceLength;
+        return targetOrigin + (int)Math.Round(normalized * targetLength);
+    }
+
+    private static bool IsUsableAnchor(int localX, int localY, int width, int height, int margin)
+    {
+        return localX > -margin
+            && localX < width + margin
+            && localY > -margin
+            && localY < height + margin;
+    }
+
     private static bool HasExpectedRegion(IntPtr hWnd, int left, int top, int right, int bottom)
     {
         RECT current;
@@ -238,34 +281,88 @@ public static class CodexPetOverlayShim
         int width = window.Right - window.Left;
         int height = window.Bottom - window.Top;
 
-        // The current renderer leaves the visible mascot near the saved anchor,
-        // while the native input surface can remain at the old top layout.
-        // Keep the shim bounded to a small area around that saved mascot.
-        //
-        // On some Windows/DPI combinations the saved display coordinates and
-        // the native overlay window use different spaces.  A direct conversion
-        // is preferred when it lands inside the window; otherwise use the
-        // anchor's normalized position within the saved display.  Never clamp
-        // an invalid conversion to a one-pixel strip: SetWindowRgn also clips
-        // drawing, which can make the mascot disappear.
-        int directLeft = anchorX - window.Left - 128;
-        int directTop = anchorY - window.Top - 96;
-        bool directFits = directLeft > -160 && directLeft < width + 160
-            && directTop > -128 && directTop < height + 128;
-        int anchorLocalX = directFits
-            ? directLeft
-            : displayWidth > 0
-                ? (int)Math.Round((double)(anchorX - displayX) * width / displayWidth) - 128
-                : width / 2 - 128;
-        int anchorLocalY = directFits
-            ? directTop
-            : displayHeight > 0
-                ? (int)Math.Round((double)(anchorY - displayY) * height / displayHeight) - 96
-                : height / 2 - 96;
-        int left = Clamp(anchorLocalX, 0, Math.Max(0, width - 160));
-        int top = Clamp(anchorLocalY, 0, Math.Max(0, height - 160));
-        int right = Math.Min(width, left + 300);
-        int bottom = Math.Min(height, top + 300);
+        // The saved x/y values are the top-left of the mascot bounds.  Map
+        // them through the monitor that owns the live overlay first: Electron
+        // and a DPI-virtualized PowerShell host can report the same monitor in
+        // different coordinate spaces.  Fall back to the direct value only
+        // when the monitor/display metadata is unavailable or implausible.
+        RECT monitorBounds;
+        bool haveMonitorBounds = TryGetMonitorBounds(overlay, out monitorBounds);
+        int monitorWidth = haveMonitorBounds
+            ? Math.Abs(monitorBounds.Right - monitorBounds.Left)
+            : 0;
+        int monitorHeight = haveMonitorBounds
+            ? Math.Abs(monitorBounds.Bottom - monitorBounds.Top)
+            : 0;
+        int directLocalX = anchorX - window.Left;
+        int directLocalY = anchorY - window.Top;
+        int anchorLocalX = directLocalX;
+        int anchorLocalY = directLocalY;
+        string mode = "direct";
+        int candidateMargin = Math.Max(
+            DEFAULT_MASCOT_WIDTH,
+            Math.Min(256, Math.Min(width, height) / 4));
+
+        if (haveMonitorBounds && displayWidth > 0 && displayHeight > 0)
+        {
+            int mappedAnchorX = MapCoordinate(
+                anchorX,
+                displayX,
+                displayWidth,
+                monitorBounds.Left,
+                monitorWidth);
+            int mappedAnchorY = MapCoordinate(
+                anchorY,
+                displayY,
+                displayHeight,
+                monitorBounds.Top,
+                monitorHeight);
+            int mappedLocalX = mappedAnchorX - window.Left;
+            int mappedLocalY = mappedAnchorY - window.Top;
+            if (IsUsableAnchor(mappedLocalX, mappedLocalY, width, height, candidateMargin))
+            {
+                anchorLocalX = mappedLocalX;
+                anchorLocalY = mappedLocalY;
+                mode = "display-mapped";
+            }
+        }
+
+        // Keep a compatibility fallback for older state files without usable
+        // display metadata.  This path assumes the overlay window follows the
+        // saved display as a normalized viewport.
+        if (!IsUsableAnchor(anchorLocalX, anchorLocalY, width, height, candidateMargin)
+            && displayWidth > 0
+            && displayHeight > 0)
+        {
+            anchorLocalX = (int)Math.Round((double)(anchorX - displayX) * width / displayWidth);
+            anchorLocalY = (int)Math.Round((double)(anchorY - displayY) * height / displayHeight);
+            mode = "window-normalized";
+        }
+
+        // SetWindowRgn clips painting as well as mouse input.  Size the region
+        // from the app's standard 112x121 mascot box plus monitor-relative
+        // padding instead of a fixed 300x300 box and fixed offsets.  The
+        // generous margin absorbs small renderer/DPI rounding differences.
+        int horizontalPadding = monitorWidth > 0
+            ? Math.Max(96, Math.Min(192, monitorWidth / 12))
+            : 128;
+        int verticalPadding = monitorHeight > 0
+            ? Math.Max(96, Math.Min(192, monitorHeight / 12))
+            : 128;
+        int requestedRegionWidth = Math.Max(
+            320,
+            DEFAULT_MASCOT_WIDTH + horizontalPadding * 2);
+        int requestedRegionHeight = Math.Max(
+            320,
+            DEFAULT_MASCOT_HEIGHT + verticalPadding * 2);
+        int regionWidth = Math.Min(width, requestedRegionWidth);
+        int regionHeight = Math.Min(height, requestedRegionHeight);
+        int mascotCenterX = anchorLocalX + DEFAULT_MASCOT_WIDTH / 2;
+        int mascotCenterY = anchorLocalY + DEFAULT_MASCOT_HEIGHT / 2;
+        int left = Clamp(mascotCenterX - regionWidth / 2, 0, Math.Max(0, width - regionWidth));
+        int top = Clamp(mascotCenterY - regionHeight / 2, 0, Math.Max(0, height - regionHeight));
+        int right = Math.Min(width, left + regionWidth);
+        int bottom = Math.Min(height, top + regionHeight);
         if (right <= left || bottom <= top)
         {
             return "invalid-target-region";
@@ -310,7 +407,7 @@ public static class CodexPetOverlayShim
         return string.Format(
             "applied hwnd=0x{0:X} mode={1} window={2},{3},{4}x{5} region={6},{7},{8}x{9}",
             overlay.ToInt64(),
-            directFits ? "direct" : "normalized",
+            mode,
             window.Left,
             window.Top,
             width,
@@ -352,6 +449,156 @@ if ([string]::IsNullOrWhiteSpace($profileRoot)) {
 }
 $statePath = Join-Path $profileRoot '.codex\.codex-global-state.json'
 
+function ConvertTo-PetAnchor {
+    param(
+        [object]$Bounds,
+        [string]$Source
+    )
+
+    if ($null -eq $Bounds) {
+        return $null
+    }
+
+    $xProperty = $Bounds.PSObject.Properties['x']
+    $yProperty = $Bounds.PSObject.Properties['y']
+    if ($null -eq $xProperty -or $null -eq $yProperty) {
+        return $null
+    }
+
+    $displayX = 0
+    $displayY = 0
+    $displayWidth = 0
+    $displayHeight = 0
+    $displayProperty = $Bounds.PSObject.Properties['displayBounds']
+    $displayBounds = if ($null -ne $displayProperty) { $displayProperty.Value } else { $null }
+    if ($null -ne $displayBounds) {
+        $displayXProperty = $displayBounds.PSObject.Properties['x']
+        $displayYProperty = $displayBounds.PSObject.Properties['y']
+        $displayWidthProperty = $displayBounds.PSObject.Properties['width']
+        $displayHeightProperty = $displayBounds.PSObject.Properties['height']
+        if ($null -ne $displayXProperty -and $null -ne $displayYProperty -and $null -ne $displayWidthProperty -and $null -ne $displayHeightProperty) {
+            $displayX = [int]$displayXProperty.Value
+            $displayY = [int]$displayYProperty.Value
+            $displayWidth = [int]$displayWidthProperty.Value
+            $displayHeight = [int]$displayHeightProperty.Value
+        }
+    }
+
+    [pscustomobject]@{
+        X = [int]$xProperty.Value
+        Y = [int]$yProperty.Value
+        DisplayX = $displayX
+        DisplayY = $displayY
+        DisplayWidth = $displayWidth
+        DisplayHeight = $displayHeight
+        Source = $Source
+    }
+}
+
+function Get-CurrentOverlayMonitorBounds {
+    try {
+        $overlay = [CodexPetOverlayShim]::FindOverlay()
+        if ($overlay -eq [IntPtr]::Zero) {
+            return $null
+        }
+
+        $monitor = New-Object -TypeName 'CodexPetOverlayShim+RECT'
+        if (-not [CodexPetOverlayShim]::TryGetMonitorBounds($overlay, [ref]$monitor)) {
+            return $null
+        }
+
+        [pscustomobject]@{
+            X = $monitor.Left
+            Y = $monitor.Top
+            Width = [Math]::Abs($monitor.Right - $monitor.Left)
+            Height = [Math]::Abs($monitor.Bottom - $monitor.Top)
+        }
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-PetDisplayScore {
+    param(
+        [object]$Candidate,
+        [object]$CurrentDisplay
+    )
+
+    if ($null -eq $CurrentDisplay) {
+        return 0
+    }
+    if ($Candidate.DisplayWidth -le 0 -or $Candidate.DisplayHeight -le 0) {
+        return -1000000000
+    }
+
+    $candidateWidth = [double]$Candidate.DisplayWidth
+    $candidateHeight = [double]$Candidate.DisplayHeight
+    $currentWidth = [double]$CurrentDisplay.Width
+    $currentHeight = [double]$CurrentDisplay.Height
+    if ($currentWidth -le 0 -or $currentHeight -le 0) {
+        return 0
+    }
+
+    $aspectDifference = [Math]::Abs(
+        ($candidateWidth / $candidateHeight) - ($currentWidth / $currentHeight))
+    $sizeDifference =
+        ([Math]::Abs($candidateWidth - $currentWidth) / [Math]::Max($candidateWidth, $currentWidth)) +
+        ([Math]::Abs($candidateHeight - $currentHeight) / [Math]::Max($candidateHeight, $currentHeight))
+    $score = -($aspectDifference * 100000) - ($sizeDifference * 100)
+    if ($Candidate.DisplayWidth -eq $CurrentDisplay.Width -and $Candidate.DisplayHeight -eq $CurrentDisplay.Height) {
+        $score += 1000000
+    }
+    return $score
+}
+
+function Get-PetAnchorFromState {
+    param([object]$GlobalState)
+
+    $boundsProperty = $GlobalState.PSObject.Properties['electron-avatar-overlay-bounds']
+    $bounds = if ($null -ne $boundsProperty) { $boundsProperty.Value } else { $null }
+    $rootCandidate = ConvertTo-PetAnchor -Bounds $bounds -Source 'root'
+    if ($null -eq $rootCandidate) {
+        return $script:lastKnownAnchor
+    }
+
+    $currentDisplay = Get-CurrentOverlayMonitorBounds
+    if ($null -eq $currentDisplay) {
+        $script:lastKnownAnchor = $rootCandidate
+        return $rootCandidate
+    }
+
+    $candidates = @($rootCandidate)
+    foreach ($collectionName in @('byResolution', 'byDisplayId')) {
+        $collectionProperty = $bounds.PSObject.Properties[$collectionName]
+        if ($null -eq $collectionProperty -or $null -eq $collectionProperty.Value) {
+            continue
+        }
+
+        foreach ($entry in $collectionProperty.Value.PSObject.Properties) {
+            $candidate = ConvertTo-PetAnchor `
+                -Bounds $entry.Value `
+                -Source ("{0}:{1}" -f $collectionName, $entry.Name)
+            if ($null -ne $candidate) {
+                $candidates += $candidate
+            }
+        }
+    }
+
+    $bestCandidate = $rootCandidate
+    $bestScore = Get-PetDisplayScore -Candidate $rootCandidate -CurrentDisplay $currentDisplay
+    foreach ($candidate in $candidates) {
+        $score = Get-PetDisplayScore -Candidate $candidate -CurrentDisplay $currentDisplay
+        if ($score -gt $bestScore) {
+            $bestCandidate = $candidate
+            $bestScore = $score
+        }
+    }
+
+    $script:lastKnownAnchor = $bestCandidate
+    return $bestCandidate
+}
+
 function Get-PetAnchor {
     if ($null -ne $script:anchorOverride) {
         return $script:anchorOverride
@@ -361,55 +608,19 @@ function Get-PetAnchor {
         return $script:lastKnownAnchor
     }
 
-    # The app rewrites this large JSON file while dragging/restarting. Read only
-    # the small root-level bounds object first so a transient partial write does
-    # not terminate the watch loop or flood the log with the whole state file.
+    # The app rewrites this large JSON file while dragging/restarting. Cache the
+    # parsed document by write time, and keep the last complete document if a
+    # transient partial write is observed. This also lets us select the
+    # display-specific entry without reparsing the file on every watch tick.
     for ($attempt = 0; $attempt -lt 4; $attempt++) {
         try {
+            $stateItem = Get-Item -LiteralPath $statePath -ErrorAction Stop
             $rawState = [System.IO.File]::ReadAllText($statePath)
-            $boundsMatch = [regex]::Match(
-                $rawState,
-                '"electron-avatar-overlay-bounds"\s*:\s*\{[^{}]*?"x"\s*:\s*(-?\d+)[^{}]*?"y"\s*:\s*(-?\d+)',
-                [System.Text.RegularExpressions.RegexOptions]::Singleline)
-            if ($boundsMatch.Success) {
-                $anchor = [pscustomobject]@{
-                    X = [int]$boundsMatch.Groups[1].Value
-                    Y = [int]$boundsMatch.Groups[2].Value
-                    DisplayX = 0
-                    DisplayY = 0
-                    DisplayWidth = 0
-                    DisplayHeight = 0
-                }
-                $displayMatch = [regex]::Match(
-                    $rawState,
-                    '"electron-avatar-overlay-bounds"\s*:\s*\{.*?"displayBounds"\s*:\s*\{\s*"x"\s*:\s*(-?\d+)\s*,\s*"y"\s*:\s*(-?\d+)\s*,\s*"width"\s*:\s*(\d+)\s*,\s*"height"\s*:\s*(\d+)',
-                    [System.Text.RegularExpressions.RegexOptions]::Singleline)
-                if ($displayMatch.Success) {
-                    $anchor.DisplayX = [int]$displayMatch.Groups[1].Value
-                    $anchor.DisplayY = [int]$displayMatch.Groups[2].Value
-                    $anchor.DisplayWidth = [int]$displayMatch.Groups[3].Value
-                    $anchor.DisplayHeight = [int]$displayMatch.Groups[4].Value
-                }
-                $script:lastKnownAnchor = $anchor
-                return $anchor
+            if ($null -eq $script:cachedGlobalState -or $script:cachedStateWriteTimeUtc -ne $stateItem.LastWriteTimeUtc) {
+                $script:cachedGlobalState = $rawState | ConvertFrom-Json
+                $script:cachedStateWriteTimeUtc = $stateItem.LastWriteTimeUtc
             }
-
-            # Fall back to the JSON parser if field order/format changes.
-            $globalState = $rawState | ConvertFrom-Json
-            $property = $globalState.PSObject.Properties['electron-avatar-overlay-bounds']
-            $bounds = if ($null -ne $property) { $property.Value } else { $null }
-            if ($null -ne $bounds -and $null -ne $bounds.x -and $null -ne $bounds.y) {
-                $anchor = [pscustomobject]@{
-                    X = [int]$bounds.x
-                    Y = [int]$bounds.y
-                    DisplayX = if ($null -ne $bounds.displayBounds) { [int]$bounds.displayBounds.x } else { 0 }
-                    DisplayY = if ($null -ne $bounds.displayBounds) { [int]$bounds.displayBounds.y } else { 0 }
-                    DisplayWidth = if ($null -ne $bounds.displayBounds) { [int]$bounds.displayBounds.width } else { 0 }
-                    DisplayHeight = if ($null -ne $bounds.displayBounds) { [int]$bounds.displayBounds.height } else { 0 }
-                }
-                $script:lastKnownAnchor = $anchor
-                return $anchor
-            }
+            break
         }
         catch {
             if ($attempt -lt 3) {
@@ -418,7 +629,11 @@ function Get-PetAnchor {
         }
     }
 
-    return $script:lastKnownAnchor
+    if ($null -eq $script:cachedGlobalState) {
+        return $script:lastKnownAnchor
+    }
+
+    return Get-PetAnchorFromState -GlobalState $script:cachedGlobalState
 }
 
 if ($Restore) {
